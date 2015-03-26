@@ -37,7 +37,7 @@ from samba.auth import system_session
 
 from mmc.plugins.base.config import BasePluginConfig
 from mmc.plugins.base import ldapUserGroupControl, delete_diacritics
-from mmc.plugins.samba4 import getSamba4GlobalInfo
+from mmc.plugins.samba4 import getSamba4GlobalInfo, getDcConfig
 from mmc.plugins.samba4.samba4 import SambaAD
 from mmc.support.config import PluginConfigFactory
 
@@ -592,9 +592,11 @@ class S4Sync(object):
 
     def reset(self):
         samba_base_dn = get_samba_base_dn()
-        if samba_base_dn is None:
+        dc_config = getDcConfig()
+
+        if samba_base_dn is None or dc_config is None:
             raise Samba4NotProvisioned()
-#         self.logger.debug('Samba base dn: %s' % samba_base_dn)
+        #         self.logger.debug('Samba base dn: %s' % samba_base_dn)
         self.samba_ldap = SambaLdap(samba_base_dn)
         ldap_creds = get_openldap_config()
 #         self.logger.debug('ldap config: %s' % ldap_creds)

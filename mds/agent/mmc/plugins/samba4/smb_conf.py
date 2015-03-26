@@ -73,6 +73,7 @@ class SambaConf:
     def __init__(self):
         config = Samba4Config("samba4")
         self.smb_conf_path = config.conf_file
+        self.dc_conf_path = config.conf_dc
         self.default_shares_path = config.defaultSharesPath
         self.authorizedSharePaths = config.authorizedSharePaths
         self.prefix = config.samba_prefix
@@ -81,6 +82,9 @@ class SambaConf:
             self.config = ConfigObj(self.smb_conf_path, interpolation=False,
                                     list_values=False, write_empty_values=True,
                                     encoding='utf8')
+            self.dc_config = ConfigObj(self.dc_conf_path, interpolation=False,
+                                       list_values=False, write_empty_values=True,
+                                       encoding='utf8')
         except ParseError as e:
             logger.error("Failed to parse %s : %s ", self.smb_conf_path, e)
 
@@ -193,6 +197,19 @@ class SambaConf:
                 f.write(openchange_conf_template.render())
         return params
 
+    def writeDcConfig(self, mode=None, user=None, passwd=None):
+        if 'dc' not in self.dc_config:
+            self.dc_config['dc'] = {}
+
+        if mode:
+            self.dc_config['dc']['mode'] = mode
+        if user:
+            self.dc_config['dc']['user'] = user
+        if passwd:
+            self.dc_config['dc']['passwd'] = passwd
+
+        self.saveDcConfig()
+
     def writeKrb5Config(self, realm):
         params = {'realm': realm.upper()}
         krb5_conf_template = env.get_template('krb5.conf')
@@ -228,12 +245,28 @@ class SambaConf:
         """
         Write SAMBA configuration file (smb.conf) to disk
         """
+        return self.genericSave(self.config, self.smb_conf_path, self.validate)
+#         _, tmpfname = tempfile.mkstemp("mmc")
+#         self.config.filename = tmpfname
+#         self.config.write()
+#         if not self.validate(tmpfname):
+#             raise Exception("smb.conf file is not valid (%s)" % tmpfname)
+#         shutil.copy(tmpfname, self.smb_conf_path)
+#         os.remove(tmpfname)
+#         return True
+
+    def saveDcConfig(self):
+        return self.genericSave(self.dc_config, self.dc_conf_path)
+
+    def genericSave(self, config, file_path, validate=None):
+        """ write config file to disk """
         _, tmpfname = tempfile.mkstemp("mmc")
-        self.config.filename = tmpfname
-        self.config.write()
-        if not self.validate(tmpfname):
-            raise Exception("smb.conf file is not valid (%s)" % tmpfname)
-        shutil.copy(tmpfname, self.smb_conf_path)
+        config.filename = tmpfname
+        config.write()
+        if validate and not validate(tmpfname):
+            raise Exception("%s file is not valid (%s)" %
+                            (file_path, tmpfname))
+        shutil.copy(tmpfname, file_path)
         os.remove(tmpfname)
         return True
 

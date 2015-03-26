@@ -232,3 +232,22 @@ def reloadSamba():
 
 def saveOptions(options):
     return SambaConf().saveOptions(options)
+
+
+def getDcConfig():
+    '''
+    Return the local mode of the DC: 'dc' | 'bdc' | 'rodc' and the name and password used during the setup.
+    (user,passwd) are useful to fetch users' credentials when we are RODC.
+    @rtype: dict
+    @return: {'mode': , 'user': , 'passwd': }
+    '''
+    return SambaConf().dc_config['dc']
+
+
+def setDcConfig(user, passwd):
+    '''
+    Allows to change the (user,passwd) used (when we are RODC) to connect to the DC.
+    Mode is simply copied.
+    '''
+    conf = getDcConfig()
+    SambaConf().writeDcConfig(mode=conf['mode'], user=user, passwd=passwd)
