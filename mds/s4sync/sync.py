@@ -29,6 +29,7 @@ import pytz
 import time
 import os
 import logging
+from subprocess import Popen, PIPE
 
 import ldb
 from samba.samdb import SamDB
@@ -37,7 +38,7 @@ from samba.auth import system_session
 
 from mmc.plugins.base.config import BasePluginConfig
 from mmc.plugins.base import ldapUserGroupControl, delete_diacritics
-from mmc.plugins.samba4 import getSamba4GlobalInfo, getDcConfig
+from mmc.plugins.samba4 import getSamba4GlobalInfo
 from mmc.plugins.samba4.samba4 import SambaAD
 from mmc.support.config import PluginConfigFactory
 
@@ -46,6 +47,7 @@ from k5key_asn1 import encode_keys, decode_keys
 
 
 lp = LoadParm()
+rodc = SamDB(lp=lp).am_rodc()
 
 
 class LdapUserMixin(object):
@@ -238,7 +240,23 @@ class SambaLdap(LdapUserMixin):
             raise Exception("Too many users found!")
 
         user = result[0]
-        return (str(user.get('supplementalCredentials')), str(user.get('unicodePwd')))
+
+        if (user.get('supplementalCredentials') is None and
+                user.get('unicodePwd') is None):
+            raise NoCredentials(username)
+
+        return (str(user.get('supplementalCredentials')),
+                str(user.get('unicodePwd')))
+
+    def refresh_credentials(self, username):
+        p = Popen(['samba-tool', 'rodc', 'preload', username, '--server',
+                   '192.168.220.10'], stdout=PIPE, stderr=PIPE)
+        out, err = p.communicate()
+        logger.debug(out)
+        if p.returncode != 0:
+            raise Exception("Failed to refresh %s credentials" % username)
+        else:
+            return self.get_credentials(username)
 
     def update_credentials_for(
             self, username, supplemental_credentials, unicode_pwd, timestamp):
@@ -538,14 +556,29 @@ class GroupNotFound(Exception):
         super(GroupNotFound, self).__init__(msg)
 
 
+class NoCredentials(Exception):
+
+    def __init__(self, user):
+        message = "No credentials found for user %s" % user
+        Exception.__init__(self, message)
+
+
 def copy_password_from_samba_to_ldap(username, samba_ldap, openldap, timestamp):
-    sup, uni = samba_ldap.get_credentials(username)
+    try:
+        sup, uni = samba_ldap.get_credentials(username)
+    except NoCredentials:
+        if rodc:
+            sup, uni = samba_ldap.refresh_credentials(username)
+        else:
+            raise
     creds = Credentials(unicode_pwd=uni, supplemental_credentials=sup)
     keys = encode_keys(creds.keys)
     openldap.set_kerberos_keys_for(username, keys, timestamp)
-    # FIXME change openldap schema to mark pwdChangedTime as NO readonly
-    openldap_timestamp = openldap.password_timestamp_for(username)
-    samba_ldap.update_password_timestamp_for(username, openldap_timestamp)
+    # Can't update samba in rodc mode
+    if not rodc:
+        # FIXME change openldap schema to mark pwdChangedTime as NO readonly
+        openldap_timestamp = openldap.password_timestamp_for(username)
+        samba_ldap.update_password_timestamp_for(username, openldap_timestamp)
 
 
 def copy_password_from_ldap_to_samba(username, samba_ldap, openldap, timestamp):
@@ -592,14 +625,12 @@ class S4Sync(object):
 
     def reset(self):
         samba_base_dn = get_samba_base_dn()
-        dc_config = getDcConfig()
-
-        if samba_base_dn is None or dc_config is None:
+        if samba_base_dn is None:
             raise Samba4NotProvisioned()
-        #         self.logger.debug('Samba base dn: %s' % samba_base_dn)
+        # self.logger.debug('Samba base dn: %s' % samba_base_dn)
         self.samba_ldap = SambaLdap(samba_base_dn)
         ldap_creds = get_openldap_config()
-#         self.logger.debug('ldap config: %s' % ldap_creds)
+        # self.logger.debug('ldap config: %s' % ldap_creds)
         self.openldap = OpenLdap(ldap_creds['base_dn'], ldap_creds['bind_dn'],
                                  ldap_creds['bind_pw'])
 
@@ -611,7 +642,8 @@ class S4Sync(object):
             self.logger.info("Updating %s password on OpenLdap" % user)
             copy_password_from_samba_to_ldap(user, self.samba_ldap,
                                              self.openldap, samba_timestamp)
-        elif openldap_timestamp > samba_timestamp:
+        # Nerver update samba in rodc mode
+        elif openldap_timestamp > samba_timestamp and not rodc:
             self.logger.info("Updating %s password on Samba" % user)
             copy_password_from_ldap_to_samba(user, self.samba_ldap,
                                              self.openldap, openldap_timestamp)
@@ -621,7 +653,8 @@ class S4Sync(object):
         if samba_timestamp > openldap_timestamp:
             self.logger.info("Updating %s info on OpenLdap" % user)
             self.openldap.sync_user_with(user, self.samba_ldap)
-        elif openldap_timestamp > samba_timestamp:
+        # Nerver update samba in rodc mode
+        elif openldap_timestamp > samba_timestamp and not rodc:
             self.logger.info("Updating %s info on Samba" % user)
             self.samba_ldap.sync_user_with(user, self.openldap)
 
@@ -702,7 +735,8 @@ class S4Sync(object):
             for user in openldap_users - samba_users:
                 self.logger.debug("OpenLdap User %s is not in Samba" % user)
                 user_timestamp = openldap_listed_users[user]
-                if user_timestamp > last_sync_timestamp:
+                # Nerver update samba in rodc mode
+                if user_timestamp > last_sync_timestamp and not rodc:
                     # Create it on Samba
                     self.logger.debug("\tCreating user %s on samba" % user)
                     self.samba_ldap.create_user(user, self.openldap)
@@ -711,6 +745,7 @@ class S4Sync(object):
                         user)
                     copy_password_from_ldap_to_samba(user, self.samba_ldap,
                                                      self.openldap, openldap_timestamp)
+                # TODO: handle rodc ?
                 else:
                     # Delete it on OpenLdap
                     self.logger.debug("\tDeleting user %s on openldap because its "
@@ -736,7 +771,11 @@ class S4Sync(object):
                 self.logger.debug("Samba User %s is not in OpenLdap" % user)
                 # User does not exist on OpenLdap
                 user_timestamp = samba_listed_users[user]
-                if user_timestamp > last_sync_timestamp:
+                # The user_timestamp may be less than last_sync_timestamp
+                # because of replication time in rodc mode. If we are in rodc
+                # we don't care about timestamps because the sync is
+                # unidirectionnal.
+                if user_timestamp > last_sync_timestamp or rodc:
                     # Create it on OpenLdap
                     self.logger.debug("\tCreating user %s on OpenLdap" % user)
                     self.openldap.create_user(user, self.samba_ldap)
@@ -753,6 +792,7 @@ class S4Sync(object):
                         user)
                     copy_password_from_samba_to_ldap(user, self.samba_ldap,
                                                      self.openldap, samba_timestamp)
+                # We will never go there in rodc mode
                 else:
                     # Delete it on Samba
                     self.logger.debug("\tDeleting user %s on samba because its "
