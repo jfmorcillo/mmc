@@ -30,6 +30,7 @@ import time
 import os
 import logging
 from subprocess import Popen, PIPE
+import fnmatch
 
 import ldb
 from samba.samdb import SamDB
@@ -98,6 +99,18 @@ class LdapUserMixin(object):
             raise UserNotFound(username, "get attributes")
         return attrs
 
+    def in_user_ignore_list(self, user):
+        for ignore in self.user_ignore_list:
+            if fnmatch.fnmatch(user, ignore):
+                return True
+        return False
+
+    def in_group_ignore_list(self, group):
+        for ignore in self.group_ignore_list:
+            if fnmatch.fnmatch(group, ignore):
+                return True
+        return False
+
     def list_users(self):
         entries = self.l.search_s(self.user_base_dn, ldap.SCOPE_SUBTREE,
                                   filterstr=self.user_list_filter,
@@ -105,7 +118,7 @@ class LdapUserMixin(object):
         users = {}
         for e in entries:
             user = e[1][self.user_pk_field][0]
-            if user not in self.user_ignore_list:
+            if not self.in_user_ignore_list(user):
                 timestamp_str = e[1][self.timestamp_field][0]
                 users[user] = self._format_timestamp(timestamp_str)
 #         logger.debug('users %s' % users)
@@ -149,7 +162,7 @@ class LdapUserMixin(object):
                 continue
 #             logger.debug('%s groups:\n    %s', self.__class__.__name__, e)
             group = e[1][self.group_pk_field][0]
-            if group not in self.group_ignore_list:
+            if not self.in_group_ignore_list(group):
                 timestamp_str = e[1][self.timestamp_field][0]
                 groups[group] = self._format_timestamp(timestamp_str)
 #         logger.debug('groups %s' % groups)
@@ -210,7 +223,7 @@ class SambaLdap(LdapUserMixin):
         self.timestamp_field = "whenChanged"
         self.user_list_filter = '(&(&(&(objectclass=user)(!(objectclass=computer)))(!(isDeleted=*))))'
         user_dns = 'dns-%s' % get_user_dns()
-        self.user_ignore_list = ['Guest', 'Invité', 'krbtgt', user_dns]
+        self.user_ignore_list = ['Guest', 'Invité', 'krbtgt*', user_dns]
         self.group_base_dn = self.base_dn
         self.group_list_filter = '(&(objectClass=group)(sAMAccountType=268435456)(groupType=-2147483646))'
         self.group_ignore_list = ['Users']
