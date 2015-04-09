@@ -35,6 +35,9 @@ import ldb
 from samba.samdb import SamDB
 from samba.param import LoadParm
 from samba.auth import system_session
+from samba.net import Net
+from samba.credentials import Credentials
+from samba.dcerpc import nbt
 
 from mmc.plugins.base.config import BasePluginConfig
 from mmc.plugins.base import ldapUserGroupControl, delete_diacritics
@@ -42,12 +45,16 @@ from mmc.plugins.samba4 import getSamba4GlobalInfo
 from mmc.plugins.samba4.samba4 import SambaAD
 from mmc.support.config import PluginConfigFactory
 
-from credentials import Credentials
+from credentials import Credentials as k5Credentials
 from k5key_asn1 import encode_keys, decode_keys
 
 
 lp = LoadParm()
-rodc = SamDB(lp=lp).am_rodc()
+samdb = SamDB(lp=lp, session_info=system_session())
+rodc = samdb.am_rodc()
+creds = Credentials()
+creds.guess(lp)
+net = Net(creds=creds, lp=lp)
 
 
 class LdapUserMixin(object):
@@ -220,15 +227,19 @@ class SambaLdap(LdapUserMixin):
         date = datetime.strptime(timestamp_str, "%Y%m%d%H%M%S.0Z")
         return date.replace(tzinfo=pytz.UTC)
 
+    @property
     def realm(self):
-        return ".".join(self.base_dn.upper().split(',')).replace('DC=', '')
+        return lp.get('realm')
+
+    @property
+    def domain(self):
+        return samdb.domain_dns_name()
 
     def get_credentials(self, username):
         # Use ldb tools to get unicodePwd
         # It is not available through ldapsearch when
         # the primary DC is a Windows server
-        samdb = SamDB(url='/var/lib/samba/private/sam.ldb',
-                      session_info=system_session(),
+        samdb = SamDB(session_info=system_session(),
                       lp=lp)
         attrs = ['unicodePwd', 'supplementalCredentials']
         result = samdb.search(self.user_base_dn, scope=ldb.SCOPE_SUBTREE,
@@ -248,9 +259,24 @@ class SambaLdap(LdapUserMixin):
         return (str(user.get('supplementalCredentials')),
                 str(user.get('unicodePwd')))
 
+    def find_dc(self):
+        """
+        Return a PDC DNS name for our domain
+        """
+        logger.debug("Searching for a DC...")
+        try:
+            ret = net.finddc(domain=self.domain,
+                             flags=nbt.NBT_SERVER_LDAP | nbt.NBT_SERVER_DS)
+        except:
+            raise Exception("Failed to find a DC for our domain %s" %
+                            self.domain)
+        logger.debug("Found %s" % ret.pdc_dns_name)
+        return ret.pdc_dns_name
+
     def refresh_credentials(self, username):
+        server = self.find_dc()
         p = Popen(['samba-tool', 'rodc', 'preload', username, '--server',
-                   '192.168.220.10'], stdout=PIPE, stderr=PIPE)
+                   server], stdout=PIPE, stderr=PIPE)
         out, err = p.communicate()
         logger.debug(out)
         if p.returncode != 0:
@@ -571,7 +597,7 @@ def copy_password_from_samba_to_ldap(username, samba_ldap, openldap, timestamp):
             sup, uni = samba_ldap.refresh_credentials(username)
         else:
             raise
-    creds = Credentials(unicode_pwd=uni, supplemental_credentials=sup)
+    creds = k5Credentials(unicode_pwd=uni, supplemental_credentials=sup)
     keys = encode_keys(creds.keys)
     openldap.set_kerberos_keys_for(username, keys, timestamp)
     # Can't update samba in rodc mode
@@ -584,7 +610,7 @@ def copy_password_from_samba_to_ldap(username, samba_ldap, openldap, timestamp):
 def copy_password_from_ldap_to_samba(username, samba_ldap, openldap, timestamp):
     keys = openldap.get_keys(username)
     keys = decode_keys(keys)
-    creds = Credentials(krb5_keys=keys)
+    creds = k5Credentials(krb5_keys=keys)
     samba_ldap.update_credentials_for(username, creds.supplemental_credentials,
                                       creds.unicode_pwd, timestamp)
 
@@ -759,7 +785,7 @@ class S4Sync(object):
             for user in samba_users - openldap_users:
                 # Maybe the user exists but does not have krb5 enabled
                 # Try to enable smbk5 overlay for this user
-                if self.openldap.enable_krb5_for(user, self.samba_ldap.realm()):
+                if self.openldap.enable_krb5_for(user, self.samba_ldap.realm):
                     self.logger.info("Enabled krb5 on OpenLdap user %s" % user)
                     # Set password from Samba
                     samba_timestamp = self.samba_ldap.password_timestamp_for(
@@ -781,7 +807,7 @@ class S4Sync(object):
                     self.openldap.create_user(user, self.samba_ldap)
                     # Enable krb5 overlay
                     if self.openldap.enable_krb5_for(
-                            user, self.samba_ldap.realm()):
+                            user, self.samba_ldap.realm):
                         self.logger.info(
                             "\tEnabled krb5 on OpenLdap user %s" %
                             user)
