@@ -19,6 +19,7 @@
 #
 # Author(s):
 #   Jesús García Sáez <jgarcia@zentyal.com>
+#   Jean-Philippe Braun <jpbraun@mandriva.com>
 #
 
 import ldap
@@ -29,7 +30,6 @@ import pytz
 import time
 import os
 import logging
-from subprocess import Popen, PIPE
 import fnmatch
 
 import ldb
@@ -39,6 +39,8 @@ from samba.auth import system_session
 from samba.net import Net
 from samba.credentials import Credentials
 from samba.dcerpc import nbt
+from samba.dcerpc import misc, drsuapi
+from samba.drs_utils import drs_Replicate
 
 from mmc.plugins.base.config import BasePluginConfig
 from mmc.plugins.base import ldapUserGroupControl, delete_diacritics
@@ -287,15 +289,37 @@ class SambaLdap(LdapUserMixin):
         return ret.pdc_dns_name
 
     def refresh_credentials(self, username):
-        server = self.find_dc()
-        p = Popen(['samba-tool', 'rodc', 'preload', username, '--server',
-                   server], stdout=PIPE, stderr=PIPE)
-        out, err = p.communicate()
-        logger.debug(out)
-        if p.returncode != 0:
-            raise Exception("Failed to refresh %s credentials" % username)
+        dn = self.get_user_attributes(username).get('distinguishedName', None)
+        if dn is None:
+            raise Exception("Can't find user %s" % username)
         else:
-            return self.get_credentials(username)
+            dn = dn[0]
+
+        server = self.find_dc()
+        # From netcmd/rodc.py
+        creds.set_machine_account(lp)
+        remote_samdb = SamDB(url="ldap://%s" % server,
+                             session_info=system_session(),
+                             credentials=creds, lp=lp)
+
+        dc_ntds_dn = remote_samdb.get_dsServiceName()
+        res = remote_samdb.search(base=dc_ntds_dn, scope=ldb.SCOPE_BASE,
+                                  attrs=["invocationId"])
+        source_dsa_invocation_id = misc.GUID(samdb.schema_format_value("objectGUID",
+                                                                       res[0]["invocationId"][0]))
+        logger.debug("Replicating %s" % username)
+        destination_dsa_guid = misc.GUID(samdb.get_ntds_GUID())
+        samdb.transaction_start()
+        repl = drs_Replicate("ncacn_ip_tcp:%s[seal,print]" % server, lp, creds, samdb, destination_dsa_guid)
+        try:
+            repl.replicate(dn, source_dsa_invocation_id, destination_dsa_guid,
+                           exop=drsuapi.DRSUAPI_EXOP_REPL_SECRET, rodc=True)
+        except Exception, e:
+            samdb.transaction_cancel()
+            raise Exception("Error replicating DN %s" % dn, e)
+        samdb.transaction_commit()
+
+        return self.get_credentials(username)
 
     def update_credentials_for(
             self, username, supplemental_credentials, unicode_pwd, timestamp):
