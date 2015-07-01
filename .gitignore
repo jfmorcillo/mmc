@@ -9,3 +9,6 @@ packaging/*/*/BUILDROOT/
 packaging/*/*/RPMS/
 packaging/*/*/SOURCES/
 packaging/*/*/SRPMS/
+.project
+.pydevproject
+.settings

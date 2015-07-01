@@ -84,7 +84,7 @@
             var len = this.select.options.length;
             for(var i =0; i<len; i++) {
                     tmp.push(this.select.options[0].value);
-                    //window.alert(document.getElementById('select').options[0].value);
+                    window.alert(document.getElementById('select').options[0].value);
                     this.select.options[0] = null;
 
             }
